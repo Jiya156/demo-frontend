@@ -1,0 +1,96 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches:
+      - main
+      - testing
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout Code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Set environment based on branch
+      - name: Set environment variables
+        run: |
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            echo "API_URL=${{ secrets.VITE_API_URL_LIVE }}" >> $GITHUB_ENV
+            echo "SERVER_HOST=${{ secrets.AWS_EC2_HOST }}" >> $GITHUB_ENV
+            echo "SERVER_USER=${{ secrets.AWS_EC2_USER }}" >> $GITHUB_ENV
+            echo "SERVER_KEY=${{ secrets.AWS_EC2_SSH_KEY }}" >> $GITHUB_ENV
+          else
+            echo "API_URL=${{ secrets.VITE_API_URL }}" >> $GITHUB_ENV
+            echo "SERVER_HOST=${{ secrets.TESTING_SERVER_HOST }}" >> $GITHUB_ENV
+            echo "SERVER_USER=${{ secrets.TESTING_SERVER_USER }}" >> $GITHUB_ENV
+            echo "SERVER_KEY=${{ secrets.TESTING_SERVER_SSH_KEY }}" >> $GITHUB_ENV
+          fi
+
+      # 3. Install Dependencies
+      - name: Install dependencies
+        run: npm ci
+
+      # 4. Create .env file
+      - name: Create .env file
+        run: |
+          echo "VITE_API_URL=${{ env.API_URL }}" >> .env
+
+      # 5. Build Project
+      - name: Build frontend
+        run: npm run build
+
+      # 6. Prepare deep link files
+      - name: Prepare deep link files
+        run: |
+          mkdir -p dist/.well-known
+          cp public/.well-known/assetlinks.json dist/.well-known/
+          cp public/.well-known/apple-app-site-association dist/.well-known/
+
+      # 7. Clean Server Folder
+      - name: Clean old frontend
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USER }}
+          key: ${{ env.SERVER_KEY }}
+          script: |
+            sudo rm -rf /var/www/frontend/dist/*
+            sudo mkdir -p /var/www/frontend/dist
+
+      # 8. Fix Permissions
+      - name: Fix permissions
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USER }}
+          key: ${{ env.SERVER_KEY }}
+          script: |
+            sudo chown -R $USER:www-data /var/www/frontend
+            sudo chmod -R 775 /var/www/frontend
+
+      # 9. Upload Build
+      - name: Upload dist to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USER }}
+          key: ${{ env.SERVER_KEY }}
+          source: "dist/*"
+          target: "/var/www/frontend/dist"
+          strip_components: 1
+
+      # 10. Reload Nginx
+      - name: Reload Nginx
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USER }}
+          key: ${{ env.SERVER_KEY }}
+          script: |
+            sudo nginx -t
+            sudo systemctl reload nginx
